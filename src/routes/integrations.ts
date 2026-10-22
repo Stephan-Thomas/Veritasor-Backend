@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { requireAuth } from '../middleware/auth.js';
+import { requireAuth } from '../middleware/requireAuth.js';
 import { requireBusinessAuth } from '../middleware/requireBusinessAuth.js';
 import { requirePermissions, requirePolicy } from '../middleware/permissions.js';
 import { IntegrationPermission } from '../types/permissions.js';
@@ -7,6 +7,11 @@ import { getById, listByUserId, listByBusinessId, deleteById } from '../reposito
 import { z } from 'zod';
 
 const router = Router();
+
+// Integration records are keyed by UUID (see repositories/integration.ts).
+// Constraining the dynamic segment keeps provider paths such as `/razorpay`
+// and `/shopify` from being captured by the generic handlers below.
+const INTEGRATION_ID_PATTERN = '[0-9a-fA-F-]{36}';
 
 interface IntegrationType {
   name: string;
@@ -208,7 +213,7 @@ router.post('/connect',
         });
       }
 
-      console.error('Error initiating integration connection:', error);
+      console.error('Error initiating integration connection', error);
       res.status(500).json({
         error: 'Internal Server Error',
         message: 'Failed to initiate connection',
@@ -222,9 +227,9 @@ router.post('/connect',
  * @desc Disconnect a specific integration
  * @access Private - requires business authentication and disconnect permissions with ownership check
  */
-router.delete('/:integrationId',
+router.delete(`/:integrationId(${INTEGRATION_ID_PATTERN})`,
   requireBusinessAuth,
-  requirePermissions(IntegrationPermission.DISCONNECT_OWN, { checkOwnership: true }),
+  requirePermissions(IntegrationPermission.DISCONNECT_OWN, { checkOwnership: true, ownershipParam: 'integrationId' }),
   requirePolicy('delete', 'integration', {
     resourceId: (req) => req.params.integrationId,
     resourceTenantId: async (req) => (await getById(req.params.integrationId))?.businessId,
@@ -282,9 +287,9 @@ router.delete('/:integrationId',
  * @desc Get details of a specific integration
  * @access Private - requires business authentication and read permissions with ownership check
  */
-router.get('/:integrationId',
+router.get(`/:integrationId(${INTEGRATION_ID_PATTERN})`,
   requireBusinessAuth,
-  requirePermissions(IntegrationPermission.READ_OWN, { checkOwnership: true }),
+  requirePermissions(IntegrationPermission.READ_OWN, { checkOwnership: true, ownershipParam: 'integrationId' }),
   requirePolicy('read', 'integration', {
     resourceId: (req) => req.params.integrationId,
     resourceTenantId: async (req) => (await getById(req.params.integrationId))?.businessId,
@@ -339,9 +344,14 @@ router.get('/:integrationId',
 );
 
 /**
- * Helper function to generate authentication URLs for different providers
+ * Build the provider authorization URL for a supported integration.
+ *
+ * Exported so the URL contract (and the unsupported-provider throw) can be
+ * exercised directly by unit tests — the HTTP /connect route validates the
+ * provider against a Zod enum first, so this helper's `default` branch is not
+ * reachable through the router alone.
  */
-function generateAuthUrl(provider: string, state: string, redirectUri?: string): string {
+export function generateAuthUrl(provider: string, state: string, redirectUri?: string): string {
   const baseUrl = redirectUri || 'http://localhost:3000/integrations/callback';
 
   switch (provider) {
